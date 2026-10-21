@@ -31,14 +31,22 @@ SSH username: alice
 Target SSH hostname or SSH alias: f102
 ```
 
-随后自动下载适配平台的脚本、创建本机保活服务并立即启动，打印对应的 `status` 和 `remove` 命令。实例名称由用户名与主机名自动生成（示例为 `alice-f102`），**不要求用户手动编辑脚本、配置文件或输入实例名**。再次运行可以安装另一个目标；相同用户名和主机名会更新同一实例。
+随后自动检查免交互 SSH：
+
+1. **已经能免交互登录**：复用当前 SSH 配置和密钥，不重新生成密钥，不修改远端。
+2. **尚未配置**：如本机没有 `~/.ssh/id_ed25519`，自动生成 Ed25519 密钥（用于无人值守，**无 passphrase**，私钥仅留在本机）；否则复用现有公钥。SSH 连接远端一次，提示输入远端账号密码及服务器可能要求的 OTP，并将**公钥**追加到该账号的 `~/.ssh/authorized_keys`，不会覆盖现有条目或保存密码。
+3. **验证**：再次使用 `BatchMode=yes` 测试免交互登录。成功才创建并启动保活服务；最后检查 Linux 的 systemd MainPID、macOS 的 launchd 运行状态或 Windows 的计划任务运行状态。若 SSH 仍需人工输入，**不创建新服务**。
+
+安装完成会打印对应的 `status` 和 `remove` 命令。实例名称由用户名与主机名自动生成（示例为 `alice-f102`），**不要求用户手动编辑脚本、配置文件或输入实例名**。再次运行可以安装另一个目标；相同用户名和主机名会更新同一实例。
+
+**关于 SSH-OTP：** 自动安装公钥 ≠ 绕过服务器强制的 OTP。某些集群要求 `publickey + keyboard-interactive/TOTP`，即使输入过一次远端密码，以后的连接仍需动态 OTP。此时脚本会停止并说明原因；如果管理员允许自动化 TOTP，可以另行配置 [ssh-otp](https://github.com/Molaison/ssh-otp)（需要独立的 TOTP secret），验证真正无人值守后再安装保活，不能仅凭一次密码自动推导或关闭 OTP。
 
 执行远程代码前可先在 GitHub 查看 [`install.sh`](https://github.com/Molaison/ssh-login-keepalive/blob/main/install.sh) 和 [`install.ps1`](https://github.com/Molaison/ssh-login-keepalive/blob/main/install.ps1)。两条命令均从本仓库 `main` 分支下载；Windows 和 Unix shell 的启动语法不同，因此提供两条系统对应的入口，而非声称同一条命令兼容所有 shell。
 
 ## 先决条件
 
 1. 安装端有 OpenSSH Client（`ssh` / Windows `ssh.exe`），能直接访问集群登录节点，并保持开机、联网。电脑休眠或关闭时无法保活。
-2. **免交互 SSH 登录**已配置好：本机有自己的密钥及已验证的 `known_hosts`。不要把密钥放进本仓库，也不要关闭主机指纹校验。不支持每次 SSH 登录均需交互密码或 OTP 的环境。
+2. **首次安装能够正常交互式 SSH 登录**：SSH 会自行询问远端密码、OTP 和首次连接的 host key 指纹；需人工核对真实指纹。日后服务必须能够免交互登录，集群仍强制每次手动 OTP 的情况不适用。不要把密钥放进本仓库，也不要关闭主机指纹校验。
 3. 远端是有 `sleep infinity` 命令的 Linux 主机（如典型 GNU coreutils 环境）。目标账号可以是 `Linger=no`。
 
 ## 手动安装 / 高级用法
@@ -145,4 +153,4 @@ Host cluster-a
 - macOS：`./keepalivectl status cluster`；检查上述 `.log` 日志
 - Windows：使用上面的 `powershell.exe ... status cluster` 命令；检查 `%LOCALAPPDATA%\ssh-login-keepalive\cluster.log`
 
-SSH 首次连接需**交互式核对并确认真实 host key**，再执行安装；所有安装脚本都会先运行 `BatchMode=yes` 的预检查，失败则不会覆盖已有的同名配置。
+SSH 首次连接需**交互式核对并确认真实 host key**。一键安装在首次 SSH 验证失败时引导添加公钥，之后再次以 `BatchMode=yes` 验证；手动 `keepalivectl install` 则仍要求事先配置好免交互 SSH。密钥不会上传 GitHub，只有公钥发往用户指定的目标主机。

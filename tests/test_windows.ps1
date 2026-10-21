@@ -1,7 +1,7 @@
 # Run on a Windows CI runner: exercise task registration with mocked native calls.
 $ErrorActionPreference = 'Stop'
 $package = Split-Path -Parent $PSScriptRoot
-$files = @('keepalivectl.ps1', 'ssh-worker.ps1', 'install.ps1')
+$files = @('keepalivectl.ps1', 'ssh-worker.ps1', 'install.ps1', 'ssh-auth-setup.ps1')
 foreach ($file in $files) {
     $tokens = $null
     $errors = $null
@@ -27,8 +27,13 @@ $global:packageForTest = $package
 function Get-Command {
     [CmdletBinding()]
     param([string]$Name, [string]$CommandType)
-    if ($Name -ne 'ssh.exe') { throw "Unexpected Get-Command: $Name" }
-    [pscustomobject]@{ Source = $global:fakeSsh }
+    if ($Name -eq 'ssh.exe') {
+        return [pscustomobject]@{ Source = $global:fakeSsh }
+    }
+    if ($Name -eq 'ssh-keygen.exe') {
+        return [pscustomobject]@{ Source = (Join-Path $env:SystemRoot 'System32\OpenSSH\ssh-keygen.exe') }
+    }
+    throw "Unexpected Get-Command: $Name"
 }
 function New-ScheduledTaskAction {
     param($Execute, $Argument)
@@ -95,6 +100,7 @@ function Expand-Archive {
     New-Item -ItemType Directory -Path $source | Out-Null
     Copy-Item -LiteralPath (Join-Path $global:packageForTest 'keepalivectl.ps1') -Destination $source
     Copy-Item -LiteralPath (Join-Path $global:packageForTest 'ssh-worker.ps1') -Destination $source
+    Copy-Item -LiteralPath (Join-Path $global:packageForTest 'ssh-auth-setup.ps1') -Destination $source
 }
 
 try {
@@ -132,6 +138,30 @@ try {
         throw 'Bootstrap profile could not be removed.'
     }
     Write-Host 'Windows interactive GitHub bootstrap: OK'
+
+    $global:fakeSsh = Join-Path $tempDir 'ssh-enroll.cmd'
+    $env:TEST_SSH_ENROLLED = Join-Path $tempDir 'enrolled-marker'
+    Set-Content -LiteralPath $global:fakeSsh -Encoding ASCII -Value @(
+        '@echo off',
+        'if "%~1"=="-n" (',
+        '  if exist "%TEST_SSH_ENROLLED%" exit /b 0',
+        '  exit /b 255',
+        ')',
+        'if "%~1"=="-T" (',
+        '  echo enrolled > "%TEST_SSH_ENROLLED%"',
+        '  exit /b 0',
+        ')',
+        'exit /b 2'
+    )
+    $keyPath = Join-Path $tempDir 'ssh auth key\id_ed25519'
+    & (Join-Path $package 'ssh-auth-setup.ps1') -Target 'alice@login.example.org' -KeyPath $keyPath
+    if (-not (Test-Path -LiteralPath $keyPath) -or -not (Test-Path -LiteralPath "$keyPath.pub")) {
+        throw 'SSH Ed25519 key was not created on Windows.'
+    }
+    if (-not (Test-Path -LiteralPath $env:TEST_SSH_ENROLLED)) {
+        throw 'Public-key enrollment was not invoked.'
+    }
+    Write-Host 'Windows SSH key generation and enrollment simulation: OK'
 } finally {
     $env:LOCALAPPDATA = $originalAppData
     Remove-Item -LiteralPath $tempDir -Recurse -Force

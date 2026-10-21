@@ -54,7 +54,20 @@ switch ($Action) {
         Register-ScheduledTask -TaskName $taskName -Action $taskAction -Trigger $trigger `
             -Principal $principal -Settings $settings -Force | Out-Null
         Start-ScheduledTask -TaskName $taskName
+        $running = $false
+        for ($attempt = 0; $attempt -lt 6; $attempt++) {
+            $registeredTask = Get-ScheduledTask -TaskName $taskName
+            if ($registeredTask.State -eq 'Running') {
+                $running = $true
+                break
+            }
+            Start-Sleep -Seconds 1
+        }
+        if (-not $running) {
+            throw "Installed $taskName, but its task process is not running. Check Task Scheduler."
+        }
         Write-Host "Installed $taskName -> $Target (on this Windows computer)"
+        Write-Host 'Verified Task Scheduler process running; noninteractive SSH preflight passed.'
         Write-Host "Status: .\keepalivectl.ps1 status $Name"
     }
     'status' {

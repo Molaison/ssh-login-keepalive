@@ -27,28 +27,72 @@ class ShellInstallerTests(unittest.TestCase):
         self.bin_dir = self.root / "bin"
         self.bin_dir.mkdir()
         self.log = self.root / "calls.log"
+        self.enrolled = self.root / "enrolled"
+        self.uploaded = self.root / "public-key-received"
         self.env = dict(os.environ)
         self.env.update(
             HOME=str(self.home),
             TEST_LOG=str(self.log),
+            TEST_ENROLLED=str(self.enrolled),
+            TEST_UPLOAD=str(self.uploaded),
+            TEST_REGISTERED=str(self.root / "launchd-registered"),
             PATH=f"{self.bin_dir}{os.pathsep}{os.environ['PATH']}",
         )
         self.stub(
             "ssh",
             'printf "ssh %s\\n" "$*" >> "$TEST_LOG"\n'
+            'if [ "${TEST_SSH_NEEDS_ENROLL:-0}" = 1 ]; then\n'
+            '  case "$*" in\n'
+            '    *authorized_keys*)\n'
+            '      if [ "${TEST_REQUIRE_PASSWORD:-0}" = 1 ]; then\n'
+            '        printf "Remote password: " > /dev/tty\n'
+            '        IFS= read -r secret < /dev/tty || exit 1\n'
+            '        [ "$secret" = test-password ] || exit 1\n'
+            '      fi\n'
+            '      cat > "$TEST_UPLOAD"\n'
+            '      : > "$TEST_ENROLLED"\n'
+            '      exit 0;;\n'
+            '    *BatchMode=yes*)\n'
+            '      if [ ! -e "$TEST_ENROLLED" ] || [ "${TEST_SSH_REQUIRE_OTP:-0}" = 1 ]; then\n'
+            '        exit 255\n'
+            '      fi;;\n'
+            '  esac\n'
+            'fi\n'
             'exit "${TEST_SSH_FAIL:-0}"',
         )
         self.stub(
+            "ssh-keygen",
+            'printf "ssh-keygen %s\\n" "$*" >> "$TEST_LOG"\n'
+            'last=; for value in "$@"; do\n'
+            '  if [ "$last" = -f ]; then key=$value; break; fi\n'
+            '  last=$value\n'
+            'done\n'
+            '[ -n "${key:-}" ] || exit 2\n'
+            'printf "pretend-private-key\\n" > "$key"\n'
+            'printf "ssh-ed25519 AAAATEST alice@test\\n" > "$key.pub"',
+        )
+        self.stub(
             "systemctl",
-            'printf "systemctl %s\\n" "$*" >> "$TEST_LOG"',
+            'printf "systemctl %s\\n" "$*" >> "$TEST_LOG"\n'
+            'case "$*" in *"MainPID --value"*) printf "12345\\n";; esac',
         )
         self.stub("loginctl", 'printf "no\\n"')
         self.stub(
             "launchctl",
             'printf "launchctl %s\\n" "$*" >> "$TEST_LOG"\n'
+            'case "$1" in\n'
+            '  bootstrap) : > "$TEST_REGISTERED"; exit 0;;\n'
+            '  bootout) rm -f "$TEST_REGISTERED"; exit 0;;\n'
+            'esac\n'
             'if [ "$1" = print ]; then\n'
             '  if [ "${TEST_NO_GUI:-0}" = 1 ]; then exit 1; fi\n'
-            '  case "$2" in gui/*/*) test "${TEST_LAUNCH_LOADED:-0}" = 1;; esac\n'
+            '  case "$2" in\n'
+            '    gui/*/*)\n'
+            '      if [ -e "$TEST_REGISTERED" ] || [ "${TEST_LAUNCH_LOADED:-0}" = 1 ]; then\n'
+            '        printf "state = running\\n"; exit 0\n'
+            '      fi\n'
+            '      exit 1;;\n'
+            '  esac\n'
             'fi\n'
             'exit 0',
         )
@@ -128,11 +172,11 @@ class ShellInstallerTests(unittest.TestCase):
         self.run_cli("install", "../escape", "alice@cluster.example.org", success=False)
         self.assertFalse(self.log.exists())
 
-    def bootstrap_through_pipe(self, platform):
+    def bootstrap_through_pipe(self, platform, success=True):
         self.stub("uname", f'printf "{platform}\\n"')
         archive = self.root / "github-source.tar.gz"
         with tarfile.open(archive, "w:gz") as source:
-            for file in ("keepalivectl", "ssh-login-keepalive@.service"):
+            for file in ("keepalivectl", "ssh-login-keepalive@.service", "ssh-auth-setup.sh"):
                 source.add(PACKAGE / file, arcname="ssh-login-keepalive-main/" + file)
         self.env["TEST_ARCHIVE"] = str(archive)
         self.stub(
@@ -155,6 +199,7 @@ class ShellInstallerTests(unittest.TestCase):
         transcript = bytearray()
         replied_to_user = False
         replied_to_host = False
+        replied_to_password = False
         deadline = time.monotonic() + 20
         try:
             while time.monotonic() < deadline:
@@ -173,15 +218,28 @@ class ShellInstallerTests(unittest.TestCase):
                 if b"Target SSH hostname or SSH alias:" in transcript and not replied_to_host:
                     os.write(master, b"login.example.org\n")
                     replied_to_host = True
+                if (
+                    b"Remote password:" in transcript
+                    and self.env.get("TEST_REQUIRE_PASSWORD") == "1"
+                    and not replied_to_password
+                ):
+                    os.write(master, b"test-password\n")
+                    replied_to_password = True
             else:
                 self.fail("Bootstrap did not finish: " + transcript.decode(errors="replace"))
             _, status = os.waitpid(pid, 0)
-            self.assertEqual(os.waitstatus_to_exitcode(status), 0, transcript.decode(errors="replace"))
+            if success:
+                self.assertEqual(os.waitstatus_to_exitcode(status), 0, transcript.decode(errors="replace"))
+            else:
+                self.assertNotEqual(os.waitstatus_to_exitcode(status), 0)
         finally:
             os.close(master)
 
         output = transcript.decode(errors="replace")
-        self.assertIn("Installation complete. Profile: alice-login-example-org", output)
+        if success:
+            self.assertIn("Installation complete. Profile: alice-login-example-org", output)
+        else:
+            self.assertIn("unattended SSH still fails", output)
         self.assertIn("curl -fsSL --retry 2", self.log.read_text())
         self.assertIn("ssh -n -T", self.log.read_text())
 
@@ -196,6 +254,24 @@ class ShellInstallerTests(unittest.TestCase):
         plist = next((self.home / "Library/LaunchAgents").glob("*.plist"))
         with plist.open("rb") as file:
             self.assertEqual(plistlib.load(file)["ProgramArguments"][-2], "alice@login.example.org")
+
+    def test_one_line_bootstrap_enrolls_ssh_key_with_one_password(self):
+        self.env["TEST_SSH_NEEDS_ENROLL"] = "1"
+        self.env["TEST_REQUIRE_PASSWORD"] = "1"
+        self.bootstrap_through_pipe("Linux")
+        self.assertTrue(self.enrolled.exists())
+        self.assertIn("ssh-ed25519 AAAATEST", self.uploaded.read_text())
+        self.assertTrue((self.home / ".ssh/id_ed25519").exists())
+        self.assertIn("ssh-keygen -q -t ed25519 -N  -f", self.log.read_text())
+        self.assertEqual(self.log.read_text().count("ssh -T -o ConnectTimeout=15"), 1)
+        self.assertNotIn("test-password", self.log.read_text())
+
+    def test_enrollment_stops_when_remote_requires_otp_after_public_key(self):
+        self.env["TEST_SSH_NEEDS_ENROLL"] = "1"
+        self.env["TEST_SSH_REQUIRE_OTP"] = "1"
+        self.bootstrap_through_pipe("Linux", success=False)
+        self.assertTrue(self.enrolled.exists())
+        self.assertFalse((self.home / ".config/ssh-login-keepalive").exists())
 
 
 if __name__ == "__main__":

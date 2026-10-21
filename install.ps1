@@ -32,7 +32,7 @@ try {
     $binDir = Join-Path $env:LOCALAPPDATA 'ssh-login-keepalive\bin'
     New-Item -ItemType Directory -Path $binDir -Force | Out-Null
 
-    foreach ($file in @('keepalivectl.ps1', 'ssh-worker.ps1')) {
+    foreach ($file in @('keepalivectl.ps1', 'ssh-worker.ps1', 'ssh-auth-setup.ps1')) {
         $sourceFile = Join-Path $sourceDir $file
         if (-not (Test-Path -LiteralPath $sourceFile)) {
             throw "Downloaded archive is missing $file"
@@ -41,6 +41,8 @@ try {
     }
 
     $cli = Join-Path $binDir 'keepalivectl.ps1'
+    Write-Host "Checking SSH authentication for $target..."
+    & (Join-Path $binDir 'ssh-auth-setup.ps1') -Target $target
     Write-Host "Setting up $target on this Windows computer..."
     & $cli install $profile $target
 

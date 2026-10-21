@@ -57,15 +57,18 @@ curl -fsSL --retry 2 \
     -o "$tmp/source.tar.gz"
 tar -xzf "$tmp/source.tar.gz" -C "$tmp"
 source_dir="$tmp/ssh-login-keepalive-main"
-for file in keepalivectl ssh-login-keepalive@.service; do
+for file in keepalivectl ssh-login-keepalive@.service ssh-auth-setup.sh; do
     test -f "$source_dir/$file" || { echo "Downloaded archive is missing $file" >&2; exit 1; }
 done
 
 install_dir="$HOME/.local/share/ssh-login-keepalive"
 mkdir -p "$install_dir"
-cp "$source_dir/keepalivectl" "$source_dir/ssh-login-keepalive@.service" "$install_dir/"
-chmod 700 "$install_dir/keepalivectl"
+cp "$source_dir/keepalivectl" "$source_dir/ssh-login-keepalive@.service" \
+    "$source_dir/ssh-auth-setup.sh" "$install_dir/"
+chmod 700 "$install_dir/keepalivectl" "$install_dir/ssh-auth-setup.sh"
 
+printf 'Checking SSH authentication for %s...\n' "$target" >&2
+bash "$install_dir/ssh-auth-setup.sh" "$target"
 printf 'Setting up %s on this %s computer...\n' "$target" "$platform" >&2
 bash "$install_dir/keepalivectl" install "$profile" "$target"
 

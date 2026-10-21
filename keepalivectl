@@ -79,7 +79,23 @@ case "$platform" in
                 systemctl --user daemon-reload
                 systemctl --user enable "$unit"
                 systemctl --user restart "$unit"
+                healthy=0
+                for attempt in 1 2 3 4 5; do
+                    if systemctl --user is-active --quiet "$unit"; then
+                        main_pid=$(systemctl --user show "$unit" -p MainPID --value)
+                        if [[ $main_pid =~ ^[1-9][0-9]*$ ]]; then
+                            healthy=1
+                            break
+                        fi
+                    fi
+                    sleep 1
+                done
+                if [[ $healthy != 1 ]]; then
+                    echo "Installed $unit, but it is not confirmed running. Inspect: systemctl --user status $unit" >&2
+                    exit 1
+                fi
                 echo "Installed $unit -> $target (on this Linux client)"
+                echo "Verified active SSH service (PID $main_pid); noninteractive SSH preflight passed."
                 ;;
             status)
                 systemctl --user --no-pager status "$unit"
@@ -138,7 +154,20 @@ EOF
                 fi
                 launchctl enable "$service"
                 launchctl bootstrap "$domain" "$plist"
+                healthy=0
+                for attempt in 1 2 3 4 5; do
+                    if launchctl print "$service" 2>/dev/null | grep -q 'state = running'; then
+                        healthy=1
+                        break
+                    fi
+                    sleep 1
+                done
+                if [[ $healthy != 1 ]]; then
+                    echo "Installed $label, but it is not confirmed running. Inspect: launchctl print $service" >&2
+                    exit 1
+                fi
                 echo "Installed $label -> $target (on this Mac)"
+                echo 'Verified launchd service running; noninteractive SSH preflight passed.'
                 ;;
             status)
                 launchctl print "$service"
