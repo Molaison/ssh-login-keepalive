@@ -1,7 +1,7 @@
 # Run on a Windows CI runner: exercise task registration with mocked native calls.
 $ErrorActionPreference = 'Stop'
 $package = Split-Path -Parent $PSScriptRoot
-$files = @('keepalivectl.ps1', 'ssh-worker.ps1')
+$files = @('keepalivectl.ps1', 'ssh-worker.ps1', 'install.ps1')
 foreach ($file in $files) {
     $tokens = $null
     $errors = $null
@@ -22,6 +22,7 @@ Set-Content -LiteralPath $global:fakeSsh -Encoding ASCII -Value @('@echo off', '
 $global:taskInstalled = $false
 $global:taskName = ''
 $global:taskAction = $null
+$global:packageForTest = $package
 
 function Get-Command {
     [CmdletBinding()]
@@ -73,6 +74,28 @@ function Unregister-ScheduledTask {
     param($TaskName, [switch]$Confirm)
     $global:taskInstalled = $false
 }
+function Read-Host {
+    param($Prompt)
+    switch ($Prompt) {
+        'SSH username' { return 'bob' }
+        'Target SSH hostname or SSH alias' { return 'login.example.org' }
+        default { throw "Unexpected prompt: $Prompt" }
+    }
+}
+function Invoke-WebRequest {
+    param([switch]$UseBasicParsing, $Uri, $OutFile)
+    if ($Uri -notlike 'https://github.com/Molaison/ssh-login-keepalive/*main.zip') {
+        throw "Unexpected download URL: $Uri"
+    }
+    Set-Content -LiteralPath $OutFile -Value 'downloaded-by-test'
+}
+function Expand-Archive {
+    param($LiteralPath, $DestinationPath)
+    $source = Join-Path $DestinationPath 'ssh-login-keepalive-main'
+    New-Item -ItemType Directory -Path $source | Out-Null
+    Copy-Item -LiteralPath (Join-Path $global:packageForTest 'keepalivectl.ps1') -Destination $source
+    Copy-Item -LiteralPath (Join-Path $global:packageForTest 'ssh-worker.ps1') -Destination $source
+}
 
 try {
     & (Join-Path $package 'keepalivectl.ps1') install lab 'alice@cluster.example.org'
@@ -93,6 +116,22 @@ try {
         throw 'Task/profile removal failed.'
     }
     Write-Host 'Windows PowerShell and mocked Task Scheduler lifecycle: OK'
+
+    & (Join-Path $package 'install.ps1')
+    $bootstrapProfile = Join-Path $tempDir 'ssh-login-keepalive\profiles\bob-login-example-org.json'
+    $installed = Get-Content -LiteralPath $bootstrapProfile -Raw | ConvertFrom-Json
+    if ($installed.Target -ne 'bob@login.example.org' -or -not $global:taskInstalled) {
+        throw 'Interactive GitHub bootstrap did not install the Windows profile.'
+    }
+    $savedCLI = Join-Path $tempDir 'ssh-login-keepalive\bin\keepalivectl.ps1'
+    if (-not (Test-Path -LiteralPath $savedCLI)) {
+        throw 'Windows bootstrap did not retain its management command.'
+    }
+    & $savedCLI remove bob-login-example-org
+    if ($global:taskInstalled -or (Test-Path -LiteralPath $bootstrapProfile)) {
+        throw 'Bootstrap profile could not be removed.'
+    }
+    Write-Host 'Windows interactive GitHub bootstrap: OK'
 } finally {
     $env:LOCALAPPDATA = $originalAppData
     Remove-Item -LiteralPath $tempDir -Recurse -Force

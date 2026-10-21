@@ -4,20 +4,53 @@
 
 实现方式：客户端 SSH 连接远端并执行 `exec sleep infinity`。连接断开后客户端服务重试；它只维持一个 SSH 登录，**不能保证远端作业或所有 user services 一定存活**。请先确认符合集群的登录会话与后台运行政策。
 
+## 一键安装（推荐）
+
+无需 Git、无需下载 ZIP、无需手动修改配置文件。**在希望执行保活的那台电脑上**打开对应终端，复制一行命令：
+
+**macOS Terminal / Linux Terminal：**
+
+```sh
+bash -o pipefail -c 'curl -fsSL https://raw.githubusercontent.com/Molaison/ssh-login-keepalive/main/install.sh | bash'
+```
+
+脚本通过 `uname` 自动识别 macOS / Linux，分别配置 `launchd` / `systemd --user`。
+
+**Windows PowerShell：**
+
+```powershell
+powershell.exe -NoProfile -ExecutionPolicy Bypass -Command "iex (irm https://raw.githubusercontent.com/Molaison/ssh-login-keepalive/main/install.ps1 -ErrorAction Stop)"
+```
+
+脚本识别 Windows 并使用当前用户的 Task Scheduler；`-ExecutionPolicy Bypass` **仅对这次 PowerShell 进程有效**，不会更改系统策略。
+
+安装过程会依次提示：
+
+```text
+SSH username: alice
+Target SSH hostname or SSH alias: f102
+```
+
+随后自动下载适配平台的脚本、创建本机保活服务并立即启动，打印对应的 `status` 和 `remove` 命令。实例名称由用户名与主机名自动生成（示例为 `alice-f102`），**不要求用户手动编辑脚本、配置文件或输入实例名**。再次运行可以安装另一个目标；相同用户名和主机名会更新同一实例。
+
+执行远程代码前可先在 GitHub 查看 [`install.sh`](https://github.com/Molaison/ssh-login-keepalive/blob/main/install.sh) 和 [`install.ps1`](https://github.com/Molaison/ssh-login-keepalive/blob/main/install.ps1)。两条命令均从本仓库 `main` 分支下载；Windows 和 Unix shell 的启动语法不同，因此提供两条系统对应的入口，而非声称同一条命令兼容所有 shell。
+
 ## 先决条件
 
 1. 安装端有 OpenSSH Client（`ssh` / Windows `ssh.exe`），能直接访问集群登录节点，并保持开机、联网。电脑休眠或关闭时无法保活。
 2. **免交互 SSH 登录**已配置好：本机有自己的密钥及已验证的 `known_hosts`。不要把密钥放进本仓库，也不要关闭主机指纹校验。不支持每次 SSH 登录均需交互密码或 OTP 的环境。
 3. 远端是有 `sleep infinity` 命令的 Linux 主机（如典型 GNU coreutils 环境）。目标账号可以是 `Linger=no`。
 
-从 GitHub 获取本包：
+## 手动安装 / 高级用法
+
+如需自己命名实例、管理多个 SSH 配置或审查后运行，也可以从 GitHub 克隆：
 
 ```bash
 git clone https://github.com/Molaison/ssh-login-keepalive.git
 cd ssh-login-keepalive
 ```
 
-Windows 也可以使用 GitHub 的 **Code → Download ZIP** 解压，无需安装 Git。
+Windows 也可以使用 GitHub 的 **Code → Download ZIP** 解压，无需安装 Git。以下手动命令不是完成一键安装所必需的。
 
 ## Linux（systemd）
 

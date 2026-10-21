@@ -19,11 +19,12 @@ jobs:
       - name: Test Bash and simulated systemd/launchd lifecycle
         run: |
           bash -n keepalivectl
+          sh -n install.sh
           python3 -m unittest discover -s tests -p 'test_shell.py' -v
   windows:
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
-      - name: Test PowerShell and simulated Task Scheduler lifecycle
+      - name: Test PowerShell bootstrap and simulated Task Scheduler lifecycle
         shell: powershell
         run: ./tests/test_windows.ps1

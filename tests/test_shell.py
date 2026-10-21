@@ -2,9 +2,14 @@
 
 import os
 import plistlib
+import pty
+import select
+import shlex
 import subprocess
 import sys
+import tarfile
 import tempfile
+import time
 import unittest
 from pathlib import Path
 
@@ -122,6 +127,75 @@ class ShellInstallerTests(unittest.TestCase):
         self.stub("uname", 'printf "Linux\\n"')
         self.run_cli("install", "../escape", "alice@cluster.example.org", success=False)
         self.assertFalse(self.log.exists())
+
+    def bootstrap_through_pipe(self, platform):
+        self.stub("uname", f'printf "{platform}\\n"')
+        archive = self.root / "github-source.tar.gz"
+        with tarfile.open(archive, "w:gz") as source:
+            for file in ("keepalivectl", "ssh-login-keepalive@.service"):
+                source.add(PACKAGE / file, arcname="ssh-login-keepalive-main/" + file)
+        self.env["TEST_ARCHIVE"] = str(archive)
+        self.stub(
+            "curl",
+            'printf "curl %s\\n" "$*" >> "$TEST_LOG"\n'
+            'previous=; output=\n'
+            'for argument in "$@"; do\n'
+            '  if [ "$previous" = -o ]; then output=$argument; fi\n'
+            '  previous=$argument\n'
+            'done\n'
+            '[ -n "$output" ] || exit 2\n'
+            'cp "$TEST_ARCHIVE" "$output"',
+        )
+
+        pid, master = pty.fork()
+        if pid == 0:
+            command = f"cat {shlex.quote(str(PACKAGE / 'install.sh'))} | sh"
+            os.execvpe("sh", ["sh", "-c", command], self.env)
+
+        transcript = bytearray()
+        replied_to_user = False
+        replied_to_host = False
+        deadline = time.monotonic() + 20
+        try:
+            while time.monotonic() < deadline:
+                if not select.select([master], [], [], 0.25)[0]:
+                    continue
+                try:
+                    chunk = os.read(master, 65536)
+                except OSError:
+                    break  # EIO when child closes its controlling terminal.
+                if not chunk:
+                    break
+                transcript.extend(chunk)
+                if b"SSH username:" in transcript and not replied_to_user:
+                    os.write(master, b"alice\n")
+                    replied_to_user = True
+                if b"Target SSH hostname or SSH alias:" in transcript and not replied_to_host:
+                    os.write(master, b"login.example.org\n")
+                    replied_to_host = True
+            else:
+                self.fail("Bootstrap did not finish: " + transcript.decode(errors="replace"))
+            _, status = os.waitpid(pid, 0)
+            self.assertEqual(os.waitstatus_to_exitcode(status), 0, transcript.decode(errors="replace"))
+        finally:
+            os.close(master)
+
+        output = transcript.decode(errors="replace")
+        self.assertIn("Installation complete. Profile: alice-login-example-org", output)
+        self.assertIn("curl -fsSL --retry 2", self.log.read_text())
+        self.assertIn("ssh -n -T", self.log.read_text())
+
+    def test_one_line_bootstrap_on_linux(self):
+        self.bootstrap_through_pipe("Linux")
+        conf = self.home / ".config/ssh-login-keepalive/alice-login-example-org.env"
+        self.assertEqual(conf.read_text(), "TARGET=alice@login.example.org\n")
+        self.assertTrue((self.home / ".local/share/ssh-login-keepalive/keepalivectl").exists())
+
+    def test_one_line_bootstrap_on_macos(self):
+        self.bootstrap_through_pipe("Darwin")
+        plist = next((self.home / "Library/LaunchAgents").glob("*.plist"))
+        with plist.open("rb") as file:
+            self.assertEqual(plistlib.load(file)["ProgramArguments"][-2], "alice@login.example.org")
 
 
 if __name__ == "__main__":
