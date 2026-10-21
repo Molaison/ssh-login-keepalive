@@ -17,17 +17,17 @@ $tempDir = Join-Path ([System.IO.Path]::GetTempPath()) ([guid]::NewGuid().ToStri
 New-Item -ItemType Directory -Path $tempDir | Out-Null
 $originalAppData = $env:LOCALAPPDATA
 $env:LOCALAPPDATA = $tempDir
-$script:fakeSsh = Join-Path $tempDir 'ssh-stub.cmd'
-Set-Content -LiteralPath $script:fakeSsh -Encoding ASCII -Value @('@echo off', 'exit /b 0')
-$script:taskInstalled = $false
-$script:taskName = ''
-$script:taskAction = $null
+$global:fakeSsh = Join-Path $tempDir 'ssh-stub.cmd'
+Set-Content -LiteralPath $global:fakeSsh -Encoding ASCII -Value @('@echo off', 'exit /b 0')
+$global:taskInstalled = $false
+$global:taskName = ''
+$global:taskAction = $null
 
 function Get-Command {
     [CmdletBinding()]
     param([string]$Name, [string]$CommandType)
     if ($Name -ne 'ssh.exe') { throw "Unexpected Get-Command: $Name" }
-    [pscustomobject]@{ Source = $script:fakeSsh }
+    [pscustomobject]@{ Source = $global:fakeSsh }
 }
 function New-ScheduledTaskAction {
     param($Execute, $Argument)
@@ -49,7 +49,7 @@ function New-ScheduledTaskSettingsSet {
 function Get-ScheduledTask {
     [CmdletBinding()]
     param($TaskName)
-    if ($script:taskInstalled) { [pscustomobject]@{ State = 'Running' } }
+    if ($global:taskInstalled) { [pscustomobject]@{ State = 'Running' } }
 }
 function Get-ScheduledTaskInfo {
     param($TaskName)
@@ -57,9 +57,9 @@ function Get-ScheduledTaskInfo {
 }
 function Register-ScheduledTask {
     param($TaskName, $Action, $Trigger, $Principal, $Settings, [switch]$Force)
-    $script:taskName = $TaskName
-    $script:taskAction = $Action
-    $script:taskInstalled = $true
+    $global:taskName = $TaskName
+    $global:taskAction = $Action
+    $global:taskInstalled = $true
     if (-not $Trigger.AtLogOn -or $Principal.LogonType -ne 'Interactive') {
         throw 'Expected interactive user logon task.'
     }
@@ -71,12 +71,12 @@ function Start-ScheduledTask { param($TaskName) }
 function Stop-ScheduledTask { param($TaskName) }
 function Unregister-ScheduledTask {
     param($TaskName, [switch]$Confirm)
-    $script:taskInstalled = $false
+    $global:taskInstalled = $false
 }
 
 try {
     & (Join-Path $package 'keepalivectl.ps1') install lab 'alice@cluster.example.org'
-    if (-not $script:taskInstalled -or $script:taskName -notlike '*-lab') {
+    if (-not $global:taskInstalled -or $global:taskName -notlike '*-lab') {
         throw 'Task was not registered.'
     }
     $profile = Join-Path $tempDir 'ssh-login-keepalive\profiles\lab.json'
@@ -84,12 +84,12 @@ try {
     if ($conf.Target -ne 'alice@cluster.example.org') {
         throw 'Incorrect persisted Windows target.'
     }
-    if ($script:taskAction.Argument -notmatch 'ssh-worker\.ps1') {
+    if ($global:taskAction.Argument -notmatch 'ssh-worker\.ps1') {
         throw 'Registered action did not invoke the worker.'
     }
     & (Join-Path $package 'keepalivectl.ps1') status lab
     & (Join-Path $package 'keepalivectl.ps1') remove lab
-    if ($script:taskInstalled -or (Test-Path -LiteralPath $profile)) {
+    if ($global:taskInstalled -or (Test-Path -LiteralPath $profile)) {
         throw 'Task/profile removal failed.'
     }
     Write-Host 'Windows PowerShell and mocked Task Scheduler lifecycle: OK'
