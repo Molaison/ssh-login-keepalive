@@ -1,0 +1,13 @@
+[Unit]
+Description=Keep an SSH login open for %i
+After=network-online.target
+
+[Service]
+Type=simple
+EnvironmentFile=%h/.config/ssh-login-keepalive/%i.env
+ExecStart=@SSH_PATH@ -n -T -o BatchMode=yes -o ConnectTimeout=15 -o ServerAliveInterval=30 -o ServerAliveCountMax=3 ${TARGET} "exec sleep infinity"
+Restart=always
+RestartSec=10
+
+[Install]
+WantedBy=default.target

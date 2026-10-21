@@ -1,0 +1,159 @@
+#!/usr/bin/env bash
+# Install a persistent SSH login on the machine running this script.
+set -euo pipefail
+
+usage() {
+    cat <<'USAGE'
+Usage:
+  ./keepalivectl install NAME USER@HOST
+  ./keepalivectl status NAME
+  ./keepalivectl remove NAME
+
+Run on your own Linux (systemd) or macOS computer, not on the remote cluster.
+For Windows, use keepalivectl.ps1 in PowerShell instead.
+USAGE
+}
+
+if [[ $# -lt 2 || $# -gt 3 ]]; then
+    usage >&2
+    exit 2
+fi
+
+action=$1
+name=$2
+if [[ ! $name =~ ^[a-zA-Z0-9][a-zA-Z0-9_-]*$ ]]; then
+    echo 'NAME must contain only ASCII letters, digits, _ or -, starting with a letter/digit.' >&2
+    exit 2
+fi
+if [[ $action != install && $action != status && $action != remove ]]; then
+    usage >&2
+    exit 2
+fi
+if [[ $action == install ]]; then
+    if [[ $# != 3 ]]; then usage >&2; exit 2; fi
+    target=$3
+    if [[ ! $target =~ ^[a-zA-Z0-9_][a-zA-Z0-9_.-]*@[a-zA-Z0-9][a-zA-Z0-9_.-]*$ ]]; then
+        echo 'Target must be USER@HOST or USER@ssh-alias (no spaces or SSH options).' >&2
+        exit 2
+    fi
+    ssh_path=$(command -v ssh || true)
+    if [[ $ssh_path != /* || ! -x $ssh_path ]]; then
+        echo 'An executable ssh client must be available on PATH.' >&2
+        exit 1
+    fi
+    if ! "$ssh_path" -n -T -o BatchMode=yes -o ConnectTimeout=10 "$target" true; then
+        echo "SSH preflight failed for $target; configure key-based authentication and known_hosts first." >&2
+        exit 1
+    fi
+else
+    if [[ $# != 2 ]]; then usage >&2; exit 2; fi
+fi
+
+platform=$(uname -s)
+case "$platform" in
+    Linux)
+        unit="ssh-login-keepalive@${name}.service"
+        user_unit_dir="$HOME/.config/systemd/user"
+        profile_dir="$HOME/.config/ssh-login-keepalive"
+        profile="$profile_dir/$name.env"
+        template="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)/ssh-login-keepalive@.service"
+
+        case "$action" in
+            install)
+                if ! systemctl --user show-environment >/dev/null 2>&1; then
+                    echo 'This Linux client needs an active systemd --user manager.' >&2
+                    exit 1
+                fi
+                linger=$(loginctl show-user "$(id -un)" -p Linger --value 2>/dev/null || true)
+                if [[ $linger != yes ]]; then
+                    echo 'Note: this Linux client has no user linger; service stops on logout.' >&2
+                    echo 'For unattended operation after logout, ask your administrator about loginctl enable-linger.' >&2
+                fi
+                install -d -m 700 "$profile_dir"
+                install -d -m 755 "$user_unit_dir"
+                template_contents=$(cat "$template")
+                printf '%s\n' "${template_contents//@SSH_PATH@/$ssh_path}" > "$user_unit_dir/ssh-login-keepalive@.service"
+                chmod 644 "$user_unit_dir/ssh-login-keepalive@.service"
+                printf 'TARGET=%s\n' "$target" > "$profile"
+                chmod 600 "$profile"
+                systemctl --user daemon-reload
+                systemctl --user enable "$unit"
+                systemctl --user restart "$unit"
+                echo "Installed $unit -> $target (on this Linux client)"
+                ;;
+            status)
+                systemctl --user --no-pager status "$unit"
+                ;;
+            remove)
+                systemctl --user disable --now "$unit"
+                rm -f -- "$profile"
+                echo "Removed $unit"
+                ;;
+        esac
+        ;;
+    Darwin)
+        label="io.github.molaison.ssh-login-keepalive.$name"
+        domain="gui/$(id -u)"
+        service="$domain/$label"
+        agent_dir="$HOME/Library/LaunchAgents"
+        plist="$agent_dir/$label.plist"
+
+        xml_escape() {
+            printf '%s' "$1" | sed -e 's/&/\&amp;/g' -e 's/</\&lt;/g' -e 's/>/\&gt;/g' -e 's/"/\&quot;/g'
+        }
+
+        case "$action" in
+            install)
+                if ! launchctl print "$domain" >/dev/null 2>&1; then
+                    echo 'Run this installer from a logged-in macOS desktop session (launchd gui domain required).' >&2
+                    exit 1
+                fi
+                install -d -m 755 "$agent_dir"
+                install -d -m 700 "$HOME/Library/Logs/ssh-login-keepalive"
+                log_path="$HOME/Library/Logs/ssh-login-keepalive/$name.log"
+                cat > "$plist" <<EOF
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0"><dict>
+    <key>Label</key><string>$label</string>
+    <key>ProgramArguments</key><array>
+        <string>$(xml_escape "$ssh_path")</string>
+        <string>-n</string><string>-T</string>
+        <string>-o</string><string>BatchMode=yes</string>
+        <string>-o</string><string>ConnectTimeout=15</string>
+        <string>-o</string><string>ServerAliveInterval=30</string>
+        <string>-o</string><string>ServerAliveCountMax=3</string>
+        <string>$(xml_escape "$target")</string><string>exec sleep infinity</string>
+    </array>
+    <key>RunAtLoad</key><true/>
+    <key>KeepAlive</key><true/>
+    <key>ThrottleInterval</key><integer>10</integer>
+    <key>StandardErrorPath</key><string>$(xml_escape "$log_path")</string>
+</dict></plist>
+EOF
+                chmod 600 "$plist"
+                plutil -lint "$plist"
+                if launchctl print "$service" >/dev/null 2>&1; then
+                    launchctl bootout "$service"
+                fi
+                launchctl enable "$service"
+                launchctl bootstrap "$domain" "$plist"
+                echo "Installed $label -> $target (on this Mac)"
+                ;;
+            status)
+                launchctl print "$service"
+                ;;
+            remove)
+                if launchctl print "$service" >/dev/null 2>&1; then
+                    launchctl bootout "$service"
+                fi
+                rm -f -- "$plist"
+                echo "Removed $label"
+                ;;
+        esac
+        ;;
+    *)
+        echo "Unsupported OS: $platform. Use PowerShell keepalivectl.ps1 on Windows." >&2
+        exit 1
+        ;;
+esac

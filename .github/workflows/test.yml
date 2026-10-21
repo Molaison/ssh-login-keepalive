@@ -1,0 +1,29 @@
+name: Cross-platform syntax and installer tests
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  unix:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Test Bash and simulated systemd/launchd lifecycle
+        run: |
+          bash -n keepalivectl
+          python3 -m unittest discover -s tests -p 'test_shell.py' -v
+  windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Test PowerShell and simulated Task Scheduler lifecycle
+        shell: powershell
+        run: ./tests/test_windows.ps1
